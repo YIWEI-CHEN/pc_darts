@@ -13,6 +13,26 @@ PRIMITIVES = [
     'dil_conv_5x5'
 ]
 
+PRIMITIVES_NORMAL = [
+    "skip_connect",
+    "conv_3x1_1x3",
+    "dil_conv_3x3",
+    "conv 1x1",
+    "conv 3x3",
+    "sep_3x3",
+    "sep_5x5",
+    "sep_7x7"]
+
+PRIMITIVES_REDUCE = [
+    "skip_connect",
+    "avg_pool_3x3",
+    "max_pool_3x3",
+    "max_pool_5x5",
+    "max_pool_7x7"]
+
+NORMAL_NASP = PRIMITIVES_NORMAL
+REDUCE_NASP = PRIMITIVES_REDUCE
+
 NASNet = Genotype(
   normal = [
     ('sep_conv_5x5', 1),

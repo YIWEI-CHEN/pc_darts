@@ -5,6 +5,9 @@ from operations import *
 from torch.autograd import Variable
 from genotypes import PRIMITIVES
 from genotypes import Genotype
+from genotypes import NORMAL_NASP, REDUCE_NASP
+
+SPACE = 'darts'
 
 def channel_shuffle(x, groups):
     batchsize, num_channels, height, width = x.data.size()
@@ -24,12 +27,16 @@ def channel_shuffle(x, groups):
 
 class MixedOp(nn.Module):
 
-  def __init__(self, C, stride):
+  def __init__(self, C, stride, reduction):
     super(MixedOp, self).__init__()
     self._ops = nn.ModuleList()
     self.mp = nn.MaxPool2d(2,2)
     self.k = 4
-    for primitive in PRIMITIVES:
+    if SPACE == 'nasp':
+      primitives = REDUCE_NASP if reduction else NORMAL_NASP
+    else:
+      primitives = PRIMITIVES
+    for primitive in primitives:
       op = OPS[primitive](C //self.k, stride, False)
       if 'pool' in primitive:
         op = nn.Sequential(op, nn.BatchNorm2d(C //self.k, affine=False))
@@ -72,7 +79,7 @@ class Cell(nn.Module):
     for i in range(self._steps):
       for j in range(2+i):
         stride = 2 if reduction and j < 2 else 1
-        op = MixedOp(C, stride)
+        op = MixedOp(C, stride, reduction)
         self._ops.append(op)
 
   def forward(self, s0, s1, weights,weights2):
@@ -91,7 +98,7 @@ class Cell(nn.Module):
 
 class Network(nn.Module):
 
-  def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3):
+  def __init__(self, C, num_classes, layers, criterion, steps=4, multiplier=4, stem_multiplier=3, space='darts'):
     super(Network, self).__init__()
     self._C = C
     self._num_classes = num_classes
@@ -99,6 +106,8 @@ class Network(nn.Module):
     self._criterion = criterion
     self._steps = steps
     self._multiplier = multiplier
+    global SPACE
+    SPACE = space
 
     C_curr = stem_multiplier*C
     self.stem = nn.Sequential(
@@ -167,10 +176,11 @@ class Network(nn.Module):
 
   def _initialize_alphas(self):
     k = sum(1 for i in range(self._steps) for n in range(2+i))
-    num_ops = len(PRIMITIVES)
+    num_ops_normal = len(self.get_search_space(reduction=False))
+    num_ops_reduce = len(self.get_search_space(reduction=True))
 
-    self.alphas_normal = Variable(1e-3*torch.randn(k, num_ops).cuda(), requires_grad=True)
-    self.alphas_reduce = Variable(1e-3*torch.randn(k, num_ops).cuda(), requires_grad=True)
+    self.alphas_normal = Variable(1e-3*torch.randn(k, num_ops_normal).cuda(), requires_grad=True)
+    self.alphas_reduce = Variable(1e-3*torch.randn(k, num_ops_reduce).cuda(), requires_grad=True)
     self.betas_normal = Variable(1e-3*torch.randn(k).cuda(), requires_grad=True)
     self.betas_reduce = Variable(1e-3*torch.randn(k).cuda(), requires_grad=True)
     self._arch_parameters = [
@@ -185,7 +195,7 @@ class Network(nn.Module):
 
   def genotype(self):
 
-    def _parse(weights,weights2):
+    def _parse(weights,weights2, primitives):
       gene = []
       n = 2
       start = 0
@@ -195,16 +205,23 @@ class Network(nn.Module):
         W2 = weights2[start:end].copy()
         for j in range(n):
           W[j,:]=W[j,:]*W2[j]
-        edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != PRIMITIVES.index('none')))[:2]
+        if SPACE == 'nasp':
+          edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x]))))[:2]
+        else:
+          edges = sorted(range(i + 2), key=lambda x: -max(W[x][k] for k in range(len(W[x])) if k != primitives.index('none')))[:2]
         
         #edges = sorted(range(i + 2), key=lambda x: -W2[x])[:2]
         for j in edges:
           k_best = None
           for k in range(len(W[j])):
-            if k != PRIMITIVES.index('none'):
+            if SPACE == 'nasp':
               if k_best is None or W[j][k] > W[j][k_best]:
                 k_best = k
-          gene.append((PRIMITIVES[k_best], j))
+            else:
+              if k != primitives.index('none'):
+                if k_best is None or W[j][k] > W[j][k_best]:
+                  k_best = k
+          gene.append((primitives[k_best], j))
         start = end
         n += 1
       return gene
@@ -220,8 +237,11 @@ class Network(nn.Module):
       n += 1
       weightsr2 = torch.cat([weightsr2,tw2],dim=0)
       weightsn2 = torch.cat([weightsn2,tn2],dim=0)
-    gene_normal = _parse(F.softmax(self.alphas_normal, dim=-1).data.cpu().numpy(),weightsn2.data.cpu().numpy())
-    gene_reduce = _parse(F.softmax(self.alphas_reduce, dim=-1).data.cpu().numpy(),weightsr2.data.cpu().numpy())
+
+    primitives_normal = self.get_search_space(reduction=False)
+    primitives_reduce = self.get_search_space(reduction=True)
+    gene_normal = _parse(F.softmax(self.alphas_normal, dim=-1).data.cpu().numpy(),weightsn2.data.cpu().numpy(), primitives_normal)
+    gene_reduce = _parse(F.softmax(self.alphas_reduce, dim=-1).data.cpu().numpy(),weightsr2.data.cpu().numpy(), primitives_reduce)
 
     concat = range(2+self._steps-self._multiplier, self._steps+2)
     genotype = Genotype(
@@ -230,3 +250,9 @@ class Network(nn.Module):
     )
     return genotype
 
+  def get_search_space(self, reduction=False):
+    if SPACE == 'nasp':
+      primitives = REDUCE_NASP if reduction else NORMAL_NASP
+    else:
+      primitives = PRIMITIVES
+    return primitives

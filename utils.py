@@ -1,9 +1,12 @@
+import glob
+
 import os
 import numpy as np
 import torch
 import shutil
 import torchvision.transforms as transforms
 from torch.autograd import Variable
+import torchvision.datasets as dset
 
 
 class AvgrageMeter(object):
@@ -108,7 +111,7 @@ def drop_path(x, drop_prob):
   return x
 
 
-def create_exp_dir(path, scripts_to_save=None):
+def create_exp_dir(path, scripts_to_save=None, exec_script='scripts/exec.sh'):
   if not os.path.exists(path):
     os.mkdir(path)
   print('Experiment dir : {}'.format(path))
@@ -118,4 +121,49 @@ def create_exp_dir(path, scripts_to_save=None):
     for script in scripts_to_save:
       dst_file = os.path.join(path, 'scripts', os.path.basename(script))
       shutil.copyfile(script, dst_file)
+    dst_file = os.path.join(path, os.path.basename(exec_script))
+    shutil.copyfile(exec_script, dst_file)
+    subdir = os.path.basename(exec_script).split('_')[0]
+    if len(subdir) > 0:
+        os.mkdir(os.path.join(path, 'scripts', subdir))
+        for script in glob.glob('{}/*.py'.format(subdir)):
+            dst_file = os.path.join(path, 'scripts', subdir, os.path.basename(script))
+            shutil.copyfile(script, dst_file)
 
+
+def get_train_validation_loader(args):
+  train_transform, valid_transform = _data_transforms_cifar10(args)
+  train_data = dset.CIFAR10(root=args.data, train=True, download=True, transform=train_transform)
+
+  num_train = len(train_data)
+  indices = list(range(num_train))
+  split = int(np.floor(args.train_portion * num_train))
+
+  # train[0:split] as training data
+  train_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[:split])
+  train_queue = torch.utils.data.DataLoader(
+    train_data, batch_size=args.train_batch_size,
+    num_workers=args.workers, pin_memory=True, sampler=train_sampler)
+
+  # train[split:] as validation data
+  valid_sampler = torch.utils.data.sampler.SubsetRandomSampler(indices[split:])
+  valid_queue = torch.utils.data.DataLoader(
+    train_data, batch_size=args.valid_batch_size,
+    num_workers=args.workers, pin_memory=True, sampler=valid_sampler)
+  valid_queue.name = 'valid'
+
+  return train_queue, train_sampler, valid_queue
+
+
+def get_test_loader(args):
+  _, test_transform = _data_transforms_cifar10(args)
+  test_data = dset.CIFAR10(root=args.data, train=False, download=True, transform=test_transform)
+  test_queue = torch.utils.data.DataLoader(
+    test_data, batch_size=args.valid_batch_size, shuffle=False, pin_memory=True, num_workers=args.workers)
+  test_queue.name = 'test'
+  return test_queue
+
+
+def get_elaspe_time(begin, end):
+  torch.cuda.synchronize()
+  return begin.elapsed_time(end) / 1000.0
